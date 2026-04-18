@@ -1,19 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import { Calendar, Clock, User, Trash2, Plus, CheckCircle, AlertCircle, Shield, RefreshCw } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from 'firebase/firestore';
 
 // --- Firebase 초기 설정 ---
-// 환경 변수가 없는 경우를 대비한 기본값 처리
-const firebaseConfig = typeof __firebase_config !== 'undefined' 
-  ? JSON.parse(__firebase_config) 
-  : { apiKey: "", authDomain: "", projectId: "", storageBucket: "", messagingSenderId: "", appId: "" };
+// Vite 환경변수(import.meta.env)에서 읽어옵니다.
+// Netlify 배포 시 환경변수에 VITE_FIREBASE_* 값들을 등록해 주세요.
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+};
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'consult-reservation-app';
+const appId = import.meta.env.VITE_APP_ID || 'consult-reservation-app';
 
 const ROOMS = ['상담실 A', '상담실 B', '상담실 C'];
 const TIME_SLOTS = Array.from({ length: 13 }, (_, i) => `${i + 9}:00`);
@@ -36,11 +42,7 @@ const App = () => {
   useEffect(() => {
     const initAuth = async () => {
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
+        await signInAnonymously(auth);
       } catch (error) {
         console.error("Auth Error:", error);
       }
@@ -179,7 +181,7 @@ const App = () => {
                   <div className="flex items-center gap-4">
                     <span className="text-xs font-black text-gray-300 w-10">{slot}</span>
                     {res ? (
-                      <div className="flex items-center gap-2 bg-blue-50 px-3 py-1.5 rounded-full border border-blue-100 animate-in fade-in duration-500">
+                      <div className="flex items-center gap-2 bg-blue-50 px-3 py-1.5 rounded-full border border-blue-100">
                         <User size={12} className="text-blue-600" />
                         <span className="text-sm font-bold text-blue-700">{res.name}</span>
                       </div>
@@ -223,7 +225,7 @@ const App = () => {
 
       {showAddModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-4">
-          <div className="bg-white w-full max-w-sm rounded-t-[40px] sm:rounded-[40px] p-8 animate-in slide-in-from-bottom duration-300">
+          <div className="bg-white w-full max-w-sm rounded-t-[40px] sm:rounded-[40px] p-8">
             <h2 className="text-2xl font-black mb-6 text-gray-800 tracking-tight">상담실 예약</h2>
             <form onSubmit={handleAddReservation} className="space-y-5">
               <div className="grid grid-cols-2 gap-3">
