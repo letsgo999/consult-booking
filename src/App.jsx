@@ -1,31 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { Calendar, Clock, User, Trash2, Plus, CheckCircle, AlertCircle, Shield, RefreshCw } from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc } from 'firebase/firestore';
+import { Calendar, User, Trash2, Plus, CheckCircle, AlertCircle, Shield, RefreshCw } from 'lucide-react';
+import { createClient } from '@supabase/supabase-js';
 
-// --- Firebase 초기 설정 ---
-// Vite 환경변수(import.meta.env)에서 읽어옵니다.
-// Netlify 배포 시 환경변수에 VITE_FIREBASE_* 값들을 등록해 주세요.
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
-};
-
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = import.meta.env.VITE_APP_ID || 'consult-reservation-app';
+// --- Supabase 초기 설정 ---
+// Vercel 환경변수에서 값을 읽어옵니다.
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 const ROOMS = ['상담실 A', '상담실 B', '상담실 C'];
 const TIME_SLOTS = Array.from({ length: 13 }, (_, i) => `${i + 9}:00`);
 
+// 익명 사용자 ID를 브라우저에 저장 (누가 예약했는지 식별용)
+const getUserId = () => {
+  let userId = localStorage.getItem('consult_user_id');
+  if (!userId) {
+    userId = 'user_' + Math.random().toString(36).substring(2, 15);
+    localStorage.setItem('consult_user_id', userId);
+  }
+  return userId;
+};
+
 const App = () => {
-  const [user, setUser] = useState(null);
+  const [userId] = useState(getUserId());
   const [reservations, setReservations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -38,37 +35,41 @@ const App = () => {
   });
   const [message, setMessage] = useState(null);
 
-  // 1. 인증 처리 (익명 로그인)
+  // 예약 목록 불러오기
+  const fetchReservations = async () => {
+    const { data, error } = await supabase
+      .from('reservations')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Fetch Error:', error);
+    } else {
+      setReservations(data || []);
+    }
+    setLoading(false);
+  };
+
+  // 1. 초기 데이터 로드 + 실시간 동기화 구독
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        await signInAnonymously(auth);
-      } catch (error) {
-        console.error("Auth Error:", error);
-      }
+    fetchReservations();
+
+    // 실시간 구독: 다른 사람이 예약을 추가/삭제하면 즉시 반영됨
+    const channel = supabase
+      .channel('reservations-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'reservations' },
+        () => {
+          fetchReservations();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
     };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
-    return () => unsubscribe();
   }, []);
-
-  // 2. 실시간 데이터 동기화
-  useEffect(() => {
-    if (!user) return;
-
-    const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'reservations');
-    
-    const unsubscribe = onSnapshot(colRef, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setReservations(data);
-      setLoading(false);
-    }, (error) => {
-      console.error("Firestore Error:", error);
-      setLoading(false);
-    });
-
-    return () => unsubscribe();
-  }, [user]);
 
   const showTempMessage = (text, type) => {
     setMessage({ text, type });
@@ -77,12 +78,11 @@ const App = () => {
 
   const handleAddReservation = async (e) => {
     e.preventDefault();
-    if (!user) return;
     if (!formData.name) return showTempMessage("이름을 입력해주세요.", "error");
 
-    const isDuplicate = reservations.some(res => 
-      res.date === formData.date && 
-      res.time === formData.time && 
+    const isDuplicate = reservations.some(res =>
+      res.date === formData.date &&
+      res.time === formData.time &&
       res.room === formData.room
     );
 
@@ -90,33 +90,38 @@ const App = () => {
       return showTempMessage("해당 시간대에 이미 예약이 있습니다.", "error");
     }
 
-    try {
-      const resId = `${formData.date}_${formData.room}_${formData.time}`.replace(/\s+/g, '');
-      const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'reservations', resId);
-      
-      await setDoc(docRef, {
-        ...formData,
-        userId: user.uid,
-        createdAt: new Date().toISOString()
-      });
+    const { error } = await supabase
+      .from('reservations')
+      .insert([{
+        room: formData.room,
+        date: formData.date,
+        time: formData.time,
+        name: formData.name,
+        user_id: userId
+      }]);
 
+    if (error) {
+      console.error('Insert Error:', error);
+      showTempMessage("저장 실패. 다시 시도해주세요.", "error");
+    } else {
       setShowAddModal(false);
       setFormData({ ...formData, name: '' });
       showTempMessage("예약이 완료되었습니다.", "success");
-    } catch (error) {
-      showTempMessage("저장 실패. 다시 시도해주세요.", "error");
     }
   };
 
   const handleDelete = async (id) => {
-    if (!user) return;
     if (window.confirm("예약을 취소하시겠습니까?")) {
-      try {
-        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'reservations', id);
-        await deleteDoc(docRef);
-        showTempMessage("예약이 삭제되었습니다.", "success");
-      } catch (error) {
+      const { error } = await supabase
+        .from('reservations')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        console.error('Delete Error:', error);
         showTempMessage("삭제 실패.", "error");
+      } else {
+        showTempMessage("예약이 삭제되었습니다.", "success");
       }
     }
   };
@@ -129,8 +134,8 @@ const App = () => {
           <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-wider font-bold">실시간 예약 시스템</p>
         </div>
         <div className="flex gap-2">
-           {loading && <RefreshCw size={18} className="animate-spin text-gray-400 mr-2" />}
-           <button 
+          {loading && <RefreshCw size={18} className="animate-spin text-gray-400 mr-2" />}
+          <button
             onClick={() => setIsAdmin(!isAdmin)}
             className={`p-2 rounded-xl transition-all ${isAdmin ? 'bg-blue-600 text-white shadow-lg' : 'bg-gray-100 text-gray-400'}`}
           >
@@ -149,9 +154,9 @@ const App = () => {
       <main className="p-4 max-w-md mx-auto">
         <div className="mb-6 flex overflow-x-auto gap-2 pb-2 no-scrollbar">
           {ROOMS.map(room => (
-            <button 
+            <button
               key={room}
-              onClick={() => setFormData({...formData, room})}
+              onClick={() => setFormData({ ...formData, room })}
               className={`px-5 py-2.5 rounded-2xl whitespace-nowrap text-sm font-bold transition-all ${formData.room === room ? 'bg-blue-600 text-white shadow-md' : 'bg-white border border-gray-200 text-gray-500'}`}
             >
               {room}
@@ -165,10 +170,10 @@ const App = () => {
               <Calendar size={18} className="text-blue-500" />
               <span className="font-bold text-gray-700">{formData.date}</span>
             </div>
-            <input 
-              type="date" 
+            <input
+              type="date"
               value={formData.date}
-              onChange={(e) => setFormData({...formData, date: e.target.value})}
+              onChange={(e) => setFormData({ ...formData, date: e.target.value })}
               className="text-sm font-bold text-blue-600 bg-transparent border-none focus:ring-0 cursor-pointer"
             />
           </div>
@@ -189,17 +194,17 @@ const App = () => {
                       <span className="text-sm text-gray-300 font-medium">비어 있음</span>
                     )}
                   </div>
-                  
+
                   {res ? (
-                    isAdmin && (
+                    (isAdmin || res.user_id === userId) && (
                       <button onClick={() => handleDelete(res.id)} className="text-red-300 hover:text-red-500 p-2 transition-colors">
                         <Trash2 size={16} />
                       </button>
                     )
                   ) : (
-                    <button 
+                    <button
                       onClick={() => {
-                        setFormData({...formData, time: slot});
+                        setFormData({ ...formData, time: slot });
                         setShowAddModal(true);
                       }}
                       className="w-8 h-8 flex items-center justify-center bg-gray-50 text-blue-500 rounded-full hover:bg-blue-500 hover:text-white transition-all shadow-inner"
@@ -215,7 +220,7 @@ const App = () => {
       </main>
 
       {!showAddModal && (
-        <button 
+        <button
           onClick={() => setShowAddModal(true)}
           className="fixed bottom-8 left-1/2 -translate-x-1/2 w-[90%] max-w-sm h-14 bg-blue-600 text-white rounded-2xl shadow-xl shadow-blue-200 flex items-center justify-center gap-2 font-bold text-lg active:scale-95 transition-transform"
         >
@@ -231,20 +236,20 @@ const App = () => {
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <label className="text-[10px] font-black text-gray-400 ml-1 uppercase">방 선택</label>
-                  <select 
+                  <select
                     className="w-full p-4 bg-gray-50 border-none rounded-2xl font-bold focus:ring-2 focus:ring-blue-500"
                     value={formData.room}
-                    onChange={(e) => setFormData({...formData, room: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, room: e.target.value })}
                   >
                     {ROOMS.map(r => <option key={r} value={r}>{r}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-black text-gray-400 ml-1 uppercase">시간</label>
-                  <select 
+                  <select
                     className="w-full p-4 bg-gray-50 border-none rounded-2xl font-bold focus:ring-2 focus:ring-blue-500"
                     value={formData.time}
-                    onChange={(e) => setFormData({...formData, time: e.target.value})}
+                    onChange={(e) => setFormData({ ...formData, time: e.target.value })}
                   >
                     {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
                   </select>
@@ -252,23 +257,23 @@ const App = () => {
               </div>
               <div className="space-y-1">
                 <label className="text-[10px] font-black text-gray-400 ml-1 uppercase">예약자 성함</label>
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   placeholder="성함을 입력하세요"
                   className="w-full p-4 bg-gray-50 border-none rounded-2xl font-bold focus:ring-2 focus:ring-blue-500"
                   value={formData.name}
-                  onChange={(e) => setFormData({...formData, name: e.target.value})}
+                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                 />
               </div>
               <div className="flex gap-3 pt-4">
-                <button 
+                <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
                   className="flex-1 p-4 bg-gray-100 text-gray-500 font-bold rounded-2xl"
                 >
                   닫기
                 </button>
-                <button 
+                <button
                   type="submit"
                   className="flex-[2] p-4 bg-blue-600 text-white font-bold rounded-2xl shadow-lg shadow-blue-100 active:scale-95 transition-transform"
                 >
